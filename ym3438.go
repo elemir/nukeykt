@@ -732,10 +732,11 @@ func OPN2_EnvelopeADSR(chip *YM3438) {
 	var koff_event uint8
 	var eg_off uint8
 	var level int16
-	var nextlevel int16 = 0
+	var nextlevel int16
 	var ssg_level int16
 	var nextstate uint8 = chip.eg_state[slot]
-	var inc int16 = 0
+	var inc int16
+
 	chip.eg_read[0] = uint32(chip.eg_read_inc)
 	chip.eg_read_inc = cbool.ToInt[uint8](chip.eg_inc > 0)
 
@@ -743,10 +744,10 @@ func OPN2_EnvelopeADSR(chip *YM3438) {
 	chip.pg_reset[slot] = cbool.ToInt[uint8]((nkon != 0 && okon == 0) || chip.eg_ssg_pgrst_latch[slot] != 0)
 
 	/* KeyOn/Off */
-	kon_event = cbool.ToInt[uint8]((nkon != 0 && okon == 0) || (okon != 0 && chip.eg_ssg_repeat_latch[slot] == 0))
+	kon_event = cbool.ToInt[uint8]((nkon != 0 && okon == 0) || (okon != 0 && chip.eg_ssg_repeat_latch[slot] != 0))
 	koff_event = cbool.ToInt[uint8](okon != 0 && nkon == 0)
 
-	level = (int16)(chip.eg_level[slot])
+	level = int16(chip.eg_level[slot])
 	ssg_level = level
 
 	if chip.eg_ssg_inv[slot] != 0 {
@@ -815,7 +816,7 @@ func OPN2_EnvelopeADSR(chip *YM3438) {
 	nextlevel += inc
 
 	chip.eg_kon[slot] = chip.eg_kon_latch[slot]
-	chip.eg_level[slot] = (uint16)(nextlevel & 0x3ff)
+	chip.eg_level[slot] = uint16(nextlevel) & 0x3ff
 	chip.eg_state[slot] = nextstate
 }
 
@@ -844,7 +845,7 @@ func OPN2_EnvelopePrepare(chip *YM3438) {
 			}
 		} else {
 			inc = uint8(eg_stephi[rate&0x03][chip.eg_timer_low_lock] + uint32(rate)>>2 - 11)
-			inc = max(inc, 4)
+			inc = min(inc, 4)
 		}
 	}
 	chip.eg_inc = inc
@@ -899,7 +900,7 @@ func OPN2_EnvelopeGenerate(chip *YM3438) {
 
 	/* Apply TL */
 	if !(chip.mode_csm != 0 && chip.channel == 2+1) {
-		level += uint16(chip.eg_tl[0] << 3)
+		level += uint16(chip.eg_tl[0]) << 3
 	}
 	if level > 0x3ff {
 		level = 0x3ff
@@ -1085,7 +1086,8 @@ func OPN2_FMGenerate(chip *YM3438) {
 	} else {
 		output = output ^ (int16(chip.mode_test_21[4]) << 13)
 	}
-	output = SIGN_EXTEND(13, output)
+	output <<= 2
+	output >>= 2
 	chip.fm_out[slot] = output
 }
 
@@ -1251,7 +1253,7 @@ func OPN2_Clock(chip *YM3438, buffer []int32) {
 	case 23:
 		chip.lfo_inc |= 1
 	}
-	chip.eg_timer &= uint16(^(chip.mode_test_21[5] << chip.eg_cycle))
+	chip.eg_timer &= ^uint16(chip.mode_test_21[5] << chip.eg_cycle)
 	if ((chip.eg_timer>>chip.eg_cycle)|
 		uint16((chip.pin_test_in&chip.eg_custom_timer)))&
 		uint16(chip.eg_cycle_stop) != 0 {
@@ -1320,7 +1322,6 @@ func OPN2_Clock(chip *YM3438, buffer []int32) {
 }
 
 func OPN2_Write(chip *YM3438, port uint32, data uint8) {
-	fmt.Printf("Write %d %d\n", port, data)
 	port &= 3
 	chip.write_data = uint16(((port << 7) & 0x100) | uint32(data))
 	if port&1 != 0 {
@@ -1412,6 +1413,10 @@ func OPN2_WriteBuffered(chip *YM3438, port uint32, data uint8) {
 	chip.writebuf_last = (chip.writebuf_last + 1) % OPN_WRITEBUF_SIZE
 }
 
+var (
+	use_filter = 1 // FIXME(evgenii.omelchenko): should be part of chip
+)
+
 func OPN2_GenerateResampled(chip *YM3438, buf []int32) {
 	var buffer [2]int32
 	var mute uint32
@@ -1456,39 +1461,39 @@ func OPN2_GenerateResampled(chip *YM3438, buf []int32) {
 			}
 			chip.writebuf_samplecnt++
 		}
-		//		if use_filter == 0 {
-		chip.samples[0] *= OUTPUT_FACTOR
-		chip.samples[1] *= OUTPUT_FACTOR
-		/*		} else {
-					chip.samples[0] = chip.oldsamples[0] +
-						FILTER_CUTOFF_I*(chip.samples[0]*OUTPUT_FACTOR_F-
-							chip.oldsamples[0])
-					chip.samples[1] = chip.oldsamples[1] +
-						FILTER_CUTOFF_I*(chip.samples[1]*OUTPUT_FACTOR_F-
-							chip.oldsamples[1])
-				}
-		*/
+
+		if use_filter == 0 {
+			chip.samples[0] *= OUTPUT_FACTOR
+			chip.samples[1] *= OUTPUT_FACTOR
+		} else {
+			chip.samples[0] = int32(float64(chip.oldsamples[0]) +
+				FILTER_CUTOFF_I*float64(chip.samples[0]*OUTPUT_FACTOR_F-
+					chip.oldsamples[0]))
+			chip.samples[1] = int32(float64(chip.oldsamples[1]) +
+				FILTER_CUTOFF_I*float64(chip.samples[1]*OUTPUT_FACTOR_F-
+					chip.oldsamples[1]))
+		}
+
 		chip.samplecnt -= chip.rateratio
 	}
 
-	buf[0] = (int32)((chip.oldsamples[0]*(chip.rateratio-chip.samplecnt) +
+	buf[0] = ((chip.oldsamples[0]*(chip.rateratio-chip.samplecnt) +
 		chip.samples[0]*chip.samplecnt) /
 		chip.rateratio)
-	buf[1] = (int32)((chip.oldsamples[1]*(chip.rateratio-chip.samplecnt) +
+	buf[1] = ((chip.oldsamples[1]*(chip.rateratio-chip.samplecnt) +
 		chip.samples[1]*chip.samplecnt) /
 		chip.rateratio)
 	chip.samplecnt += 1 << RSM_FRAC
 }
 
 func OPN2_GenerateStream(chip *YM3438, sndptr [][]int32, numsamples uint32) {
-	var i uint32
 	var smpl, smpr []int32
 	var buffer [2]int32
 
 	smpl = sndptr[0]
 	smpr = sndptr[1]
 
-	for i = 0; i < numsamples; i++ {
+	for i := range numsamples {
 		OPN2_GenerateResampled(chip, buffer[:])
 
 		smpl[i] = buffer[0]
